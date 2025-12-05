@@ -123,14 +123,19 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
   double _windDirection = 180.0;
   bool _showWindPanel = false;
 
+  // --- 完整的球杆库 (Full Bag) ---
   final List<ClubStats> _myBag = [
     ClubStats("Driver", 200.0, 45.0, 65.0),
     ClubStats("3 Wood", 190.0, 35.0, 40.0),
     ClubStats("3 Hybrid", 160.0, 28.0, 38.0),
+    ClubStats("6 Iron", 140.0, 20.0, 32.0), // 补回
     ClubStats("7 Iron", 130.0, 18.0, 20.0),
+    ClubStats("8 Iron", 120.0, 15.0, 15.0), // 补回
     ClubStats("9 Iron", 110.0, 12.0, 10.0),
+    ClubStats("W (PW)", 100.0, 10.0, 10.0), // 补回
     ClubStats("S (SW)", 95.0, 8.0, 5.0),
-    ClubStats("Putter", 10.0, 0.0, 0.0),
+    ClubStats("58° Wedge", 80.0, 6.0, 4.0), // 补回
+    ClubStats("Putter", 10.0, 0.0, 0.0), // 推杆保留
   ];
 
   late ClubStats _selectedClub;
