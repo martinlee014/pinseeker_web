@@ -5,7 +5,6 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_math/vector_math.dart' as vector;
 import 'package:geolocator/geolocator.dart';
-// [移除] 移除了导致报错的缓存插件引用，改用原生网络加载
 
 // --- 1. 数据模型 ---
 
@@ -71,7 +70,7 @@ class PinSeekerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'PinSeeker Web',
+      title: 'PinSeeker V2.1',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         colorScheme: ColorScheme.fromSeed(
@@ -91,7 +90,7 @@ class GolfMapScreen extends StatefulWidget {
 }
 
 class _GolfMapScreenState extends State<GolfMapScreen> {
-  // --- 数据库 ---
+  // --- 数据库 (Duvenhof) ---
   final List<GolfHole> _courseDatabase = [
     GolfHole(
         number: 1,
@@ -108,10 +107,13 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
         par: 4,
         tee: const LatLng(51.253934, 6.613799),
         green: const LatLng(51.256955, 6.612713)),
+    // ... 其他洞省略
   ];
 
+  // --- 状态变量 ---
   int _currentHoleIndex = 0;
   late LatLng _currentBallPos;
+  LatLng? _manualDropPos; // [新增] 手工放置的落点标记
   final MapController _mapController = MapController();
 
   List<ShotRecord> _allShotsHistory = [];
@@ -123,7 +125,6 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
   double _windDirection = 180.0;
   bool _showWindPanel = false;
 
-  // --- 完整的球杆库 (Full Bag) ---
   final List<ClubStats> _myBag = [
     ClubStats("Driver", 200.0, 45.0, 65.0),
     ClubStats("3 Wood", 190.0, 35.0, 40.0),
@@ -135,7 +136,7 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
     ClubStats("W (PW)", 100.0, 10.0, 10.0), // 补回
     ClubStats("S (SW)", 95.0, 8.0, 5.0),
     ClubStats("58° Wedge", 80.0, 6.0, 4.0), // 补回
-    ClubStats("Putter", 10.0, 0.0, 0.0), // 推杆保留
+    ClubStats("Putter", 10.0, 0.0, 0.0),
   ];
 
   late ClubStats _selectedClub;
@@ -154,48 +155,77 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
     setState(() {
       _currentHoleIndex = index;
       _currentBallPos = _courseDatabase[index].tee;
+      _manualDropPos = null; // 清除手动点
       _currentShotNum = 1;
       _selectedClub = _myBag[0];
       _aimAngle = 0.0;
     });
     Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted) {
-        double bearing =
-            _calculateBearing(_currentHole.tee, _currentHole.green);
-        _mapController.moveAndRotate(_currentHole.tee, 17.5, -bearing);
-      }
+      double bearing = _calculateBearing(_currentHole.tee, _currentHole.green);
+      _mapController.moveAndRotate(_currentHole.tee, 17.5, -bearing);
     });
   }
 
-  // --- GPS 逻辑 ---
-  Future<void> _recordLocationAsLandingPoint() async {
+  // --- [功能 1] 发球台 GPS 修正 ---
+  Future<void> _setStartToCurrentGPS() async {
     setState(() => _isGettingLocation = true);
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) throw "Permission denied";
-      }
-
-      // 获取 GPS
-      Position position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
-          timeLimit: const Duration(seconds: 10));
-
+      Position position = await _getGeoLocation();
       LatLng gpsPos = LatLng(position.latitude, position.longitude);
-      double dist = _calculateDistance(_currentBallPos, gpsPos);
 
-      if (!mounted) return;
-      _showShotConfirmationDialog(gpsPos, dist);
+      setState(() {
+        _currentBallPos = gpsPos; // 更新球位到当前脚下
+        _aimAngle = 0.0; // 重置瞄准
+        _autoSelectClub(); // 重新计算距离选杆
+      });
+      _mapController.move(gpsPos, 18.0);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("已将发球点更新为当前位置")));
     } catch (e) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("GPS Error: $e")));
+          .showSnackBar(SnackBar(content: Text("定位失败: $e")));
     } finally {
-      if (mounted) setState(() => _isGettingLocation = false);
+      setState(() => _isGettingLocation = false);
     }
   }
 
-  void _showShotConfirmationDialog(LatLng landingPos, double distance) {
+  // --- [功能 2] GPS 记录落点 ---
+  Future<void> _recordLocationAsLandingPoint() async {
+    setState(() => _isGettingLocation = true);
+    try {
+      Position position = await _getGeoLocation();
+      LatLng gpsPos = LatLng(position.latitude, position.longitude);
+      double dist = _calculateDistance(_currentBallPos, gpsPos);
+      if (!mounted) return;
+      _showShotConfirmationDialog(gpsPos, dist, isManual: false);
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("定位失败: $e")));
+    } finally {
+      setState(() => _isGettingLocation = false);
+    }
+  }
+
+  Future<Position> _getGeoLocation() async {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) throw "没有定位权限";
+    }
+    return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10));
+  }
+
+  // --- [功能 3] 手工确认落点 ---
+  void _confirmManualDrop() {
+    if (_manualDropPos == null) return;
+    double dist = _calculateDistance(_currentBallPos, _manualDropPos!);
+    _showShotConfirmationDialog(_manualDropPos!, dist, isManual: true);
+  }
+
+  void _showShotConfirmationDialog(LatLng landingPos, double distance,
+      {required bool isManual}) {
     showDialog(
         context: context,
         barrierDismissible: false,
@@ -204,7 +234,8 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
           return StatefulBuilder(builder: (context, setState) {
             return AlertDialog(
               backgroundColor: Colors.grey[900],
-              title: const Text("记录这一杆", style: TextStyle(color: Colors.white)),
+              title: Text(isManual ? "确认手工落点" : "GPS 落点确认",
+                  style: const TextStyle(color: Colors.white)),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -233,7 +264,7 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
                     child: const Text("取消")),
                 ElevatedButton(
                   onPressed: () {
-                    _confirmShot(landingPos, distance, tempClub);
+                    _recordShot(landingPos, distance, tempClub);
                     Navigator.pop(ctx);
                   },
                   child: const Text("确认"),
@@ -244,11 +275,12 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
         });
   }
 
-  void _confirmShot(LatLng landingPos, double distance, ClubStats club) {
+  void _recordShot(LatLng landingPos, double distance, ClubStats club) {
     setState(() {
       _allShotsHistory.add(ShotRecord(_currentHole.number, _currentShotNum,
           _currentBallPos, landingPos, club.name, distance));
       _currentBallPos = landingPos;
+      _manualDropPos = null; // 清除手动标记
       _currentShotNum++;
       _aimAngle = 0.0;
       _autoSelectClub();
@@ -256,7 +288,7 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
     });
   }
 
-  // --- 记分与物理算法 ---
+  // --- 记分与物理算法 (保持不变) ---
   void _finishHoleDialog() {
     int putts = 2;
     int penalties = 0;
@@ -504,6 +536,7 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
   }
 
   void _onMapTap(TapPosition tapPosition, LatLng point) {
+    // 点击只是改变瞄准，不移动球
     double tapBearing = _calculateBearing(_currentBallPos, point);
     double holeBearing = _calculateBearing(_currentBallPos, _currentHole.green);
     double diff = tapBearing - holeBearing;
@@ -552,19 +585,22 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: _currentHole.tee,
-              initialZoom: 17.5,
+              initialCenter: _currentHole.tee, initialZoom: 17.5,
               initialRotation: -holeBearing,
               onTap: _onMapTap,
+              // [核心修改] 长按地图 -> 放置手工落点标记
+              onLongPress: (tapPos, point) {
+                setState(() {
+                  _manualDropPos = point; // 设置临时标记点
+                });
+              },
             ),
             children: [
-              // [核心] 使用默认的 NetworkTileProvider 即可，Safari 浏览器会自动缓存图片
-              // 在 Web 端，不需要复杂的缓存插件，浏览器的 HTTP Cache 机制最稳定
               TileLayer(
-                urlTemplate:
-                    'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-              ),
+                  urlTemplate:
+                      'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'),
 
+              // 历史轨迹
               PolylineLayer(
                   polylines: _allShotsHistory
                       .where((s) => s.holeNumber == _currentHole.number)
@@ -582,6 +618,7 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
                               color: Colors.white, size: 8)))
                       .toList()),
 
+              // 当前策略
               PolylineLayer(polylines: [
                 Polyline(
                     points: [_currentBallPos, plannedPos],
@@ -617,6 +654,15 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
                     point: plannedPos,
                     child: const Icon(Icons.gps_fixed,
                         color: Colors.yellow, size: 20)),
+
+                // [新增] 手工落点标记 (紫色)
+                if (_manualDropPos != null)
+                  Marker(
+                    point: _manualDropPos!,
+                    child: const Icon(Icons.location_on,
+                        color: Colors.purpleAccent, size: 40),
+                    alignment: Alignment.topCenter, // 让针尖对准点
+                  ),
               ]),
             ],
           ),
@@ -659,27 +705,87 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
             right: 10,
             child: Column(
               children: [
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.redAccent,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14)),
-                    onPressed: _isGettingLocation
-                        ? null
-                        : _recordLocationAsLandingPoint,
-                    icon: _isGettingLocation
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child:
-                                CircularProgressIndicator(color: Colors.white))
-                        : const Icon(Icons.near_me),
-                    label: Text(
-                        _isGettingLocation ? "GPS 定位中..." : "📍 到达落点 (记录GPS)"),
+                // [智能按钮区域]
+                // 1. 如果有手工标记点，显示“确认手工落点” (紫色)
+                if (_manualDropPos != null)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purpleAccent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14)),
+                      onPressed: _confirmManualDrop,
+                      icon: const Icon(Icons.touch_app),
+                      label: const Text("🖐️ 确认手工落点"),
+                    ),
+                  )
+                // 2. 如果没有手工点，且是第1杆，显示“从当前GPS开球” (蓝色)
+                else if (_currentShotNum == 1)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.blueGrey,
+                              foregroundColor: Colors.white,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 14)),
+                          onPressed:
+                              _isGettingLocation ? null : _setStartToCurrentGPS,
+                          icon: _isGettingLocation
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.white))
+                              : const Icon(Icons.my_location),
+                          label: const Text("🎯 从当前位置开球"),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      // 旁边保留 GPS 落点记录 (万一打歪了要记)
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.redAccent,
+                              foregroundColor: Colors.white,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 14)),
+                          onPressed: _isGettingLocation
+                              ? null
+                              : _recordLocationAsLandingPoint,
+                          icon: const Icon(Icons.near_me),
+                          label: const Text("📍 记录落点"),
+                        ),
+                      ),
+                    ],
+                  )
+                // 3. 普通状态：显示 GPS 记录按钮 (红色)
+                else
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14)),
+                      onPressed: _isGettingLocation
+                          ? null
+                          : _recordLocationAsLandingPoint,
+                      icon: _isGettingLocation
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                  color: Colors.white))
+                          : const Icon(Icons.near_me),
+                      label: Text(_isGettingLocation
+                          ? "GPS 定位中..."
+                          : "📍 到达落点 (记录GPS)"),
+                    ),
                   ),
-                ),
+
                 const SizedBox(height: 10),
                 Card(
                   color: Colors.grey[900]!.withOpacity(0.95),
@@ -735,6 +841,10 @@ class _GolfMapScreenState extends State<GolfMapScreen> {
                                   onChanged: (v) =>
                                       setState(() => _aimAngle = v))),
                         ]),
+                        if (_manualDropPos == null)
+                          const Text("长按地图 = 手工放置落点",
+                              style: TextStyle(
+                                  color: Colors.white24, fontSize: 10)),
                       ],
                     ),
                   ),
